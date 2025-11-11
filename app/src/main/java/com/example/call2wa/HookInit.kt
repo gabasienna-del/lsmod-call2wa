@@ -32,7 +32,7 @@ class HookInit : IXposedHookLoadPackage {
         "com.android.phone"
     )
 
-    // Строго: Первая буква заглавная + точка в конце (без триммов/регистровых преобразований)
+    // Строго: первая буква заглавная + точка в конце
     private val BAD_TOASTS = setOf(
         "Вызов завершен.",
         "Вызов переадресован.",
@@ -42,8 +42,8 @@ class HookInit : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            when (lpparam.packageName) {
-                TELECOM_PKG -> hookTelecomOutgoing(lpparam)
+            if (lpparam.packageName == TELECOM_PKG) {
+                hookTelecomOutgoing(lpparam)
             }
             if (lpparam.packageName in TOAST_PKGS) {
                 hookToastStrict(lpparam)
@@ -53,37 +53,37 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ===== 1) Вытаскиваем исходящий номер из Telecom =====
+    // ===== 1) Исходящий номер из Telecom =====
     private fun hookTelecomOutgoing(lpparam: XC_LoadPackage.LoadPackageParam) {
         XposedBridge.log("Call2WA: loaded in $TELECOM_PKG")
 
         val callsManager = findFirstClass(
-            listOf(
-                "com.android.server.telecom.CallsManager",
-                "com.android.server.telecom.CallsManager$Transaction"
-            ),
+            listOf("com.android.server.telecom.CallsManager"),
             lpparam.classLoader
         ) ?: run {
             XposedBridge.log("Call2WA: CallsManager not found")
             return
         }
 
+        // Пытаемся зацепиться за несколько вариантов методов
         val candidates = listOf("startOutgoingCall", "placeOutgoingCall", "startCall")
         for (m in candidates) {
             try {
+                // Универсальная «широкая» сигнатура (Xposed сопоставит подходящую)
                 XposedHelpers.findAndHookMethod(
                     callsManager, m,
-                    Uri::class.java,              // handle (tel:)
-                    Any::class.java,              // PhoneAccountHandle
-                    android.os.Bundle::class.java,// extras
-                    String::class.java,           // initiating user / tag
-                    Boolean::class.javaPrimitiveType!!,
-                    Boolean::class.javaPrimitiveType!!,
-                    Integer.TYPE,                 // videoState/callType
+                    Uri::class.java,                // handle (tel:)
+                    Any::class.java,                // PhoneAccountHandle (любого типа)
+                    android.os.Bundle::class.java,  // extras
+                    String::class.java,             // initiating user / tag
+                    java.lang.Boolean.TYPE,         // флаги
+                    java.lang.Boolean.TYPE,
+                    Integer.TYPE,                   // videoState/callType
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            val handle = param.args.firstOrNull { it is Uri } as? Uri
-                            val digits = handle?.schemeSpecificPart?.replace("\\D+".toRegex(), "") ?: ""
+                            // Ищем Uri среди аргументов на случай другой сигнатуры
+                            val handleArg = param.args.firstOrNull { it is Uri } as? Uri
+                            val digits = handleArg?.schemeSpecificPart?.replace("\\D+".toRegex(), "") ?: ""
                             if (digits.isNotEmpty()) {
                                 State.lastDialedDigits = digits
                                 State.lastPlacedAt = System.currentTimeMillis()
@@ -94,10 +94,12 @@ class HookInit : IXposedHookLoadPackage {
                     }
                 )
                 XposedBridge.log("Call2WA: hooked $m")
-            } catch (_: Throwable) { /* try next */ }
+            } catch (_: Throwable) {
+                // попробуем следующий кандидат
+            }
         }
 
-        // Не обязательно, просто лог причин
+        // Не обязательно, но полезно для логов
         try {
             val callClass = XposedHelpers.findClass("com.android.server.telecom.Call", lpparam.classLoader)
             XposedHelpers.findAndHookMethod(
@@ -110,10 +112,10 @@ class HookInit : IXposedHookLoadPackage {
                     }
                 }
             )
-        } catch (_: Throwable) {}
+        } catch (_: Throwable) { /* ignore */ }
     }
 
-    // ===== 2) Перехватываем Toast и из makeText, и из show() =====
+    // ===== 2) Перехватываем Toast: makeText и show() =====
     private fun hookToastStrict(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val toastClass = XposedHelpers.findClass("android.widget.Toast", lpparam.classLoader)
@@ -158,7 +160,7 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ===== 3) Условия и мгновенный запуск WhatsApp аудиозвонка (без задержек) =====
+    // ===== 3) Мгновенный запуск WhatsApp аудиозвонка =====
     private fun maybeTriggerWhatsApp() {
         try {
             val now = System.currentTimeMillis()
@@ -172,7 +174,6 @@ class HookInit : IXposedHookLoadPackage {
             State.waTriedForThisCall = true
             State.waTriggeredAt = now
 
-            // СРАЗУ, без задержек:
             openWhatsAppAudioCall(number)
         } catch (e: Throwable) {
             XposedBridge.log("Call2WA: maybeTriggerWhatsApp error: ${e.message}")
@@ -188,7 +189,7 @@ class HookInit : IXposedHookLoadPackage {
             val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
             val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
 
-            // 1) Пытаемся сразу VoIP-активности (несколько кандидатов)
+            // Пробуем сразу VoIP-активности (несколько кандидатов)
             val voipCandidates = listOf(
                 "com.whatsapp.voipcalling.VoipActivityV2",
                 "com.whatsapp.voipcalling.VoipActivity",
@@ -210,7 +211,7 @@ class HookInit : IXposedHookLoadPackage {
                 } catch (_: Throwable) {}
             }
 
-            // 2) Если не получилось — откроем чат
+            // Если не вышло — откроем чат
             if (!ok) {
                 try {
                     val conv = Intent(Intent.ACTION_MAIN).apply {
@@ -223,7 +224,7 @@ class HookInit : IXposedHookLoadPackage {
                 } catch (_: Throwable) {}
             }
 
-            // 3) Fallback через content-type (если контакт известен системе)
+            // Fallback через content-type
             if (!ok) {
                 try {
                     val callIntent = Intent(Intent.ACTION_VIEW).apply {
@@ -246,7 +247,9 @@ class HookInit : IXposedHookLoadPackage {
 
     // ===== helpers =====
     private fun findFirstClass(names: List<String>, cl: ClassLoader): Class<*>? {
-        for (n in names) try { return XposedHelpers.findClass(n, cl) } catch (_: Throwable) {}
+        for (n in names) {
+            try { return XposedHelpers.findClass(n, cl) } catch (_: Throwable) {}
+        }
         return null
     }
 }
