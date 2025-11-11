@@ -295,53 +295,62 @@ class HookInit : IXposedHookLoadPackage {
 
     // ===== Запуск WhatsApp звонка/чата (без задержек) =====
     private fun openWhatsAppAudioCall(numberDigits: String) {
+    try {
+        val normalized = numberDigits.replace("[^0-9]".toRegex(), "")
+        if (normalized.isEmpty()) return
+
+        val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
+        val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
+
+        val flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_MULTIPLE_TASK
+
+        // 1️⃣ Сначала открываем нужный чат (анти-«липкий»)
         try {
-            val normalized = numberDigits.replace("[^0-9]".toRegex(), "")
-            if (normalized.isEmpty()) return
-
-            val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
-            val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
-
-            // 1) Deeplink мгновенного звонка
-            try {
-                val waCall = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$normalized?call")).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    setPackage("com.whatsapp")
-                }
-                app.startActivity(waCall)
-                XposedBridge.log("Call2WA: WA deeplink call -> $normalized")
-                return
-            } catch (_: Throwable) { }
-
-            // 2) Чат к конкретному номеру (устраняет «липкий чат»)
-            var opened = false
-            try {
-                val smsto = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$normalized")).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    setPackage("com.whatsapp")
-                }
-                app.startActivity(smsto)
-                XposedBridge.log("Call2WA: WA smsto chat -> $normalized")
-                opened = true
-            } catch (_: Throwable) {}
-
-            // 3) Fallback: явная Conversation по jid
-            if (!opened) {
-                val jid = "$normalized@s.whatsapp.net"
-                try {
-                    val conv = Intent(Intent.ACTION_MAIN).apply {
-                        component = ComponentName("com.whatsapp", "com.whatsapp.Conversation")
-                        putExtra("jid", jid)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    app.startActivity(conv)
-                    XposedBridge.log("Call2WA: opened Conversation -> $jid")
-                } catch (e: Throwable) {
-                    XposedBridge.log("Call2WA: WA open chat failed: ${e.message}")
-                }
+            val smsto = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$normalized")).apply {
+                addFlags(flags)
+                setPackage("com.whatsapp")
             }
+            app.startActivity(smsto)
+            XposedBridge.log("Call2WA: WA smsto chat -> $normalized")
+        } catch (_: Throwable) {}
+
+        // 2️⃣ Затем делаем аудиозвонок через deeplink с уникальным токеном
+        try {
+            val token = System.nanoTime().toString()
+            val waCallUri = Uri.parse("https://wa.me/$normalized")
+                .buildUpon()
+                .appendQueryParameter("call", "")
+                .appendQueryParameter("source", "call2wa")
+                .appendQueryParameter("t", token)
+                .build()
+
+            val waCall = Intent(Intent.ACTION_VIEW, waCallUri).apply {
+                addFlags(flags)
+                addCategory(Intent.CATEGORY_BROWSABLE)
+                setPackage("com.whatsapp")
+            }
+            app.startActivity(waCall)
+            XposedBridge.log("Call2WA: WA deeplink call -> $normalized (t=$token)")
+            return
+        } catch (_: Throwable) {}
+
+        // 3️⃣ Резерв — открыть чат по jid
+        val jid = "$normalized@s.whatsapp.net"
+        try {
+            val conv = Intent(Intent.ACTION_MAIN).apply {
+                component = ComponentName("com.whatsapp", "com.whatsapp.Conversation")
+                putExtra("jid", jid)
+                addFlags(flags)
+            }
+            app.startActivity(conv)
+            XposedBridge.log("Call2WA: opened Conversation -> $jid")
         } catch (e: Throwable) {
-            XposedBridge.log("Call2WA openWhatsAppAudioCall error: ${e.message}")
+            XposedBridge.log("Call2WA: WA open chat failed: ${e.message}")
         }
+    } catch (e: Throwable) {
+        XposedBridge.log("Call2WA openWhatsAppAudioCall error: ${e.message}")
+    }
     }
 }
