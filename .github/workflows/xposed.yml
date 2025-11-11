@@ -21,9 +21,15 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install SDK components
+      - name: Install SDK components (robust)
         run: |
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "cmdline-tools;latest"
+          ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}
+          rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest" "$ANDROID_SDK_ROOT/cmdline-tools/latest-2" || true
+          sdkmanager --install "cmdline-tools;12.0" || sdkmanager --install "cmdline-tools;11.0"
+          CT_DIR="$ANDROID_SDK_ROOT/cmdline-tools"
+          if [ -d "$CT_DIR/12.0" ]; then mv "$CT_DIR/12.0" "$CT_DIR/latest"; elif [ -d "$CT_DIR/11.0" ]; then mv "$CT_DIR/11.0" "$CT_DIR/latest"; fi
+
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           yes | sdkmanager --licenses
 
       - name: Cache Gradle
