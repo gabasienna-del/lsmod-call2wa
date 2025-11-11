@@ -34,7 +34,6 @@ class HookInit : IXposedHookLoadPackage {
         "com.android.phone"
     )
 
-    // Строго: первая буква заглавная + точка
     private val BAD_TOASTS = setOf(
         "Вызов завершен.",
         "Вызов переадресован.",
@@ -55,11 +54,9 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ===== 1) Надёжный захват исходящего номера =====
+    // ===== 1) Захват исходящего номера =====
     private fun hookTelecomOutgoingStrong(lpparam: XC_LoadPackage.LoadPackageParam) {
         XposedBridge.log("Call2WA: loaded in $TELECOM_PKG")
-
-        // a) CallsManager: цепляемся ко ВСЕМ вариантам методов
         val cmClass = try { XposedHelpers.findClass("com.android.server.telecom.CallsManager", lpparam.classLoader) } catch (_: Throwable) { null }
         if (cmClass != null) {
             hookAllMethodsGrabUri(cmClass, "startOutgoingCall")
@@ -69,10 +66,8 @@ class HookInit : IXposedHookLoadPackage {
             XposedBridge.log("Call2WA: CallsManager not found")
         }
 
-        // b) Call: ловим установку handle напрямую
         val callClass = try { XposedHelpers.findClass("com.android.server.telecom.Call", lpparam.classLoader) } catch (_: Throwable) { null }
         if (callClass != null) {
-            // setHandle(Uri)
             try {
                 XposedHelpers.findAndHookMethod(callClass, "setHandle", Uri::class.java, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -80,10 +75,7 @@ class HookInit : IXposedHookLoadPackage {
                         saveDigitsFromUri("setHandle", uri)
                     }
                 })
-                XposedBridge.log("Call2WA: hooked Call#setHandle")
             } catch (_: Throwable) {}
-
-            // конструктор Call(..., Uri handle, ...)
             try {
                 XposedBridge.hookAllConstructors(callClass, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
@@ -92,7 +84,6 @@ class HookInit : IXposedHookLoadPackage {
                         }
                     }
                 })
-                XposedBridge.log("Call2WA: hooked Call::<init>")
             } catch (_: Throwable) {}
         }
     }
@@ -101,12 +92,10 @@ class HookInit : IXposedHookLoadPackage {
         try {
             XposedBridge.hookAllMethods(clazz, method, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    // ищем Uri среди любых аргументов
                     param.args?.forEach { a ->
                         when (a) {
                             is Uri -> saveDigitsFromUri(method, a)
                             else -> {
-                                // иногда номер спрятан в объекте с getHandle()
                                 try {
                                     val h = XposedHelpers.callMethod(a, "getHandle") as? Uri
                                     if (h != null) saveDigitsFromUri("$method#getHandle", h)
@@ -116,10 +105,7 @@ class HookInit : IXposedHookLoadPackage {
                     }
                 }
             })
-            XposedBridge.log("Call2WA: hookAllMethods $method OK")
-        } catch (e: Throwable) {
-            XposedBridge.log("Call2WA: hookAllMethods $method failed: ${e.message}")
-        }
+        } catch (_: Throwable) {}
     }
 
     private fun saveDigitsFromUri(tag: String, uri: Uri?) {
@@ -133,12 +119,10 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ===== 2) Перехватываем Toast (makeText и show) =====
+    // ===== 2) Перехват Toast =====
     private fun hookToastStrict(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val toastClass = XposedHelpers.findClass("android.widget.Toast", lpparam.classLoader)
-
-            // makeText
             XposedHelpers.findAndHookMethod(
                 toastClass, "makeText",
                 Context::class.java, CharSequence::class.java, Integer.TYPE,
@@ -152,8 +136,6 @@ class HookInit : IXposedHookLoadPackage {
                     }
                 }
             )
-
-            // show
             XposedHelpers.findAndHookMethod(
                 toastClass, "show",
                 object : XC_MethodHook() {
@@ -170,49 +152,41 @@ class HookInit : IXposedHookLoadPackage {
                     }
                 }
             )
-
-            XposedBridge.log("Call2WA: Toast hooks set for ${lpparam.packageName}")
-        } catch (e: Throwable) {
-            XposedBridge.log("Call2WA: Toast hook failed in ${lpparam.packageName}: ${e.message}")
-        }
+        } catch (_: Throwable) {}
     }
 
-    // ===== 3) Запуск WhatsApp сразу; если номера нет — берём из CallLog =====
+    // ===== 3) Триггер WhatsApp =====
     private fun maybeTriggerWhatsApp(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            var number = State.lastDialedDigits
             val now = System.currentTimeMillis()
-            val recentDial = (now - State.lastPlacedAt) <= 60_000 // минуту держим «актуальным»
             val cooldown = (now - State.waTriggeredAt) >= 3_000
-
-            if ((number.isNullOrBlank() || !recentDial) && lpparam.packageName == "com.android.phone") {
-                // попробуем вытащить из CallLog последний исходящий за 2 минуты
-                number = tryFetchLastOutgoingFromCallLog()
-                if (!number.isNullOrBlank()) {
-                    State.lastDialedDigits = number
-                    State.lastPlacedAt = now
-                    XposedBridge.log("Call2WA: number from CallLog = $number")
-                }
+            val freshFromLog = tryFetchLastOutgoingFromCallLog(windowMillis = 20_000)
+            val candidate = when {
+                !freshFromLog.isNullOrBlank() -> freshFromLog
+                !State.lastDialedDigits.isNullOrBlank() -> State.lastDialedDigits
+                else -> null
             }
 
-            if (number.isNullOrBlank()) {
+            if (candidate.isNullOrBlank()) {
                 XposedBridge.log("Call2WA: skip — number unknown")
                 return
             }
-            if (State.waTriedForThisCall && !cooldown) {
-                XposedBridge.log("Call2WA: skip — already tried recently")
-                return
-            }
+            if (State.waTriedForThisCall && !cooldown) return
 
+            State.lastDialedDigits = candidate
+            State.lastPlacedAt = now
             State.waTriedForThisCall = true
             State.waTriggeredAt = now
-            openWhatsAppAudioCall(number!!)
+
+            XposedBridge.log("Call2WA: triggering WA for $candidate")
+            openWhatsAppAudioCall(candidate)
+            State.lastDialedDigits = null
         } catch (e: Throwable) {
             XposedBridge.log("Call2WA: maybeTriggerWhatsApp error: ${e.message}")
         }
     }
 
-    private fun tryFetchLastOutgoingFromCallLog(): String? {
+    private fun tryFetchLastOutgoingFromCallLog(windowMillis: Long = 120_000): String? {
         return try {
             val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
             val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
@@ -220,13 +194,12 @@ class HookInit : IXposedHookLoadPackage {
             val uri = CallLog.Calls.CONTENT_URI
             val proj = arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE, CallLog.Calls.TYPE)
             val sel = "${CallLog.Calls.TYPE}=? AND ${CallLog.Calls.DATE}>=?"
-            val twoMinAgo = System.currentTimeMillis() - 2 * 60_000
-            val args = arrayOf(CallLog.Calls.OUTGOING_TYPE.toString(), twoMinAgo.toString())
+            val since = System.currentTimeMillis() - windowMillis
+            val args = arrayOf(CallLog.Calls.OUTGOING_TYPE.toString(), since.toString())
             val sort = "${CallLog.Calls.DATE} DESC LIMIT 1"
-            val c: Cursor? = cr.query(uri, proj, sel, args, sort)
-            c?.use {
-                if (it.moveToFirst()) {
-                    val num = it.getString(0) ?: return null
+            cr.query(uri, proj, sel, args, sort)?.use { c ->
+                if (c.moveToFirst()) {
+                    val num = c.getString(0) ?: return null
                     val digits = num.replace("\\D+".toRegex(), "")
                     return if (digits.isNotEmpty()) digits else null
                 }
@@ -238,39 +211,40 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
+    // ===== 4) Запуск WhatsApp звонка или чата =====
     private fun openWhatsAppAudioCall(numberDigits: String) {
         try {
             val normalized = numberDigits.replace("[^0-9]".toRegex(), "")
             if (normalized.isEmpty()) return
-            val jid = "$normalized@s.whatsapp.net"
-
             val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
             val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
 
-            // пробуем сразу VoIP активность (несколько вариантов)
-            val voipCandidates = listOf(
-                "com.whatsapp.voipcalling.VoipActivityV2",
-                "com.whatsapp.voipcalling.VoipActivity",
-                "com.whatsapp.voip.VoipActivity",
-                "com.whatsapp.calling.CallActivity"
-            )
-            var ok = false
-            for (cls in voipCandidates) {
-                if (ok) break
-                try {
-                    val i = Intent(Intent.ACTION_MAIN).apply {
-                        component = ComponentName("com.whatsapp", cls)
-                        putExtra("jid", jid)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    app.startActivity(i)
-                    ok = true
-                    XposedBridge.log("Call2WA: WA VoIP via $cls -> $jid")
-                } catch (_: Throwable) {}
-            }
+            // 1) Deeplink звонка
+            try {
+                val waCall = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$normalized?call")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    setPackage("com.whatsapp")
+                }
+                app.startActivity(waCall)
+                XposedBridge.log("Call2WA: WA deeplink call -> $normalized")
+                return
+            } catch (_: Throwable) { }
 
-            if (!ok) {
-                // откроем чат
+            // 2) Chat через smsto: (всегда открывает новый диалог)
+            var opened = false
+            try {
+                val smsto = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$normalized")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    setPackage("com.whatsapp")
+                }
+                app.startActivity(smsto)
+                XposedBridge.log("Call2WA: WA smsto chat -> $normalized")
+                opened = true
+            } catch (_: Throwable) {}
+
+            // 3) Fallback Conversation
+            if (!opened) {
+                val jid = "$normalized@s.whatsapp.net"
                 try {
                     val conv = Intent(Intent.ACTION_MAIN).apply {
                         component = ComponentName("com.whatsapp", "com.whatsapp.Conversation")
@@ -279,21 +253,8 @@ class HookInit : IXposedHookLoadPackage {
                     }
                     app.startActivity(conv)
                     XposedBridge.log("Call2WA: opened Conversation -> $jid")
-                } catch (_: Throwable) {}
-
-                // и ещё один запасной способ
-                try {
-                    val callIntent = Intent(Intent.ACTION_VIEW).apply {
-                        data = Uri.parse("content://com.android.contacts/data")
-                        type = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
-                        putExtra("jid", jid)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        setPackage("com.whatsapp")
-                    }
-                    app.startActivity(callIntent)
-                    XposedBridge.log("Call2WA: WA VoIP via content-type -> $jid")
                 } catch (e: Throwable) {
-                    XposedBridge.log("Call2WA: WA call failed: ${e.message}")
+                    XposedBridge.log("Call2WA: WA open chat failed: ${e.message}")
                 }
             }
         } catch (e: Throwable) {
