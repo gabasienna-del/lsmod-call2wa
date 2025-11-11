@@ -29,20 +29,19 @@ class HookInit : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         when (lpparam.packageName) {
-            // процессы телефонии/звонилки (под разные прошивки)
+            // Звонилка
             "com.android.phone",
             "com.android.dialer",
             "com.google.android.dialer",
             "com.samsung.android.dialer" -> {
-                hookDialerByStates(lpparam)   // осн. триггер: OFFHOOK -> IDLE
-                hookToastTrigger(lpparam)     // запасной триггер по тостам
+                hookDialerByStates(lpparam)
+                hookToastTrigger(lpparam)
             }
-            // в WhatsApp — автоклик по кнопке аудиозвонка, когда пришли с ?call=1
+            // WhatsApp — автоклик по “Аудиозвонок”
             "com.whatsapp" -> hookWhatsAppAutoclick(lpparam)
         }
     }
 
-    // ===== ОСНОВНОЙ ТРИГГЕР: по состояниям вызова =====
     private fun hookDialerByStates(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val tmClass = XposedHelpers.findClass("android.telephony.TelephonyManager", lpparam.classLoader)
@@ -74,7 +73,7 @@ class HookInit : IXposedHookLoadPackage {
                                         val num = lastNumber
                                         XposedBridge.log("Call2WA: IDLE age=$age num=$num")
                                         if (num != null && age in 0..30000) {
-                                            ui.postDelayed({ openWhatsApp(num) }, 300)
+                                            ui.postDelayed({ openWhatsApp(num) }, 400)
                                         }
                                         callWasOutgoing = false
                                     }
@@ -94,30 +93,24 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // читаем последний исходящий из журнала
     private fun getLastOutgoing(ctx: Context): Pair<String, Long> {
         return try {
             val uri = CallLog.Calls.CONTENT_URI
             val proj = arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE, CallLog.Calls.TYPE)
             ctx.contentResolver.query(
-                uri,
-                proj,
+                uri, proj,
                 "${CallLog.Calls.TYPE}=?",
                 arrayOf(CallLog.Calls.OUTGOING_TYPE.toString()),
                 "${CallLog.Calls.DATE} DESC LIMIT 1"
             )?.use { c ->
-                if (c.moveToFirst()) {
-                    val num = c.getString(0) ?: ""
-                    val ts = c.getLong(1)
-                    Pair(num, ts)
-                } else Pair("", 0L)
+                if (c.moveToFirst()) Pair(c.getString(0) ?: "", c.getLong(1))
+                else Pair("", 0L)
             } ?: Pair("", 0L)
         } catch (_: Throwable) {
             Pair("", 0L)
         }
     }
 
-    // ===== ЗАПАСНОЙ ТРИГГЕР: по тостам из звонилки =====
     private fun hookToastTrigger(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             XposedHelpers.findAndHookMethod(
@@ -131,21 +124,17 @@ class HookInit : IXposedHookLoadPackage {
                             .replace("\\s+".toRegex(), " ").trim()
 
                         val triggers = listOf(
-                            // RU
                             "вызов переадресован", "переадресован",
-                            "вызов завершен", "вызов завершен", "завершен", "завершен",
+                            "вызов завершен", "вызов завершён", "завершен", "завершён",
                             "линия занята", "линия занят", "занята", "занят",
-                            // KZ (корни слов)
-                            "кайта багыттал", "аяктал", "сызык бос емс", "кызык бос емс",
-                            // EN
-                            "call forwarded", "call ended", "line busy", "busy", "ended", "forwarded"
+                            "call forwarded", "call ended", "line busy", "busy"
                         )
 
                         val hit = triggers.any { plain.contains(it) }
                         if (!hit) return
                         val num = lastNumber ?: return
                         ui.postDelayed({ openWhatsApp(num) }, 300)
-                        XposedBridge.log("Call2WA: toast '$raw' -> open WA for $num")
+                        XposedBridge.log("Call2WA: toast '$raw' -> open WhatsApp for $num")
                     }
                 }
             )
@@ -154,7 +143,6 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // нормализация номера под KZ: 8XXXXXXXXXX -> 7XXXXXXXXXX; 10 цифр -> 7XXXXXXXXXX
     private fun sanitize(raw: String?): String {
         val d = (raw ?: "").replace("\\D+".toRegex(), "")
         return when {
@@ -180,7 +168,6 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ===== WhatsApp: автоклик по кнопке аудиозвонка с повторами =====
     private fun hookWhatsAppAutoclick(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val at = XposedHelpers.findClass("android.app.ActivityThread", null)
@@ -204,10 +191,7 @@ class HookInit : IXposedHookLoadPackage {
                             val id = v.id
                             if (id != View.NO_ID) {
                                 val name = try { v.resources.getResourceEntryName(id) } catch (_: Throwable) { "" }
-                                if (name.contains("voice", true) ||
-                                    name.contains("audio_call", true) ||
-                                    name.contains("call_voice", true)
-                                ) return true
+                                if (name.contains("voice", true) || name.contains("audio_call", true)) return true
                             }
                             return false
                         }
