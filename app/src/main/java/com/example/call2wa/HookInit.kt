@@ -306,17 +306,25 @@ class HookInit : IXposedHookLoadPackage {
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     Intent.FLAG_ACTIVITY_MULTIPLE_TASK
 
-        // 1️⃣ Сначала открываем нужный чат (анти-«липкий»)
+        // Сброс стека WhatsApp перед открытием нового чата (анти-"залипание")
         try {
-            val smsto = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$normalized")).apply {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                component = ComponentName("com.whatsapp", "com.whatsapp.HomeActivity")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            }
+            app.startActivity(homeIntent)
+        } catch (_: Throwable) {}
+
+        // Открываем конкретный чат для номера (без логов)
+        try {
+            val smstoIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$normalized")).apply {
                 addFlags(flags)
                 setPackage("com.whatsapp")
             }
-            app.startActivity(smsto)
-            XposedBridge.log("Call2WA: WA smsto chat -> $normalized")
+            app.startActivity(smstoIntent)
         } catch (_: Throwable) {}
 
-        // 2️⃣ Затем делаем аудиозвонок через deeplink с уникальным токеном
+        // Сразу инициируем звонок через deeplink с уникальным токеном (анти-кэш)
         try {
             val token = System.nanoTime().toString()
             val waCallUri = Uri.parse("https://wa.me/$normalized")
@@ -326,31 +334,27 @@ class HookInit : IXposedHookLoadPackage {
                 .appendQueryParameter("t", token)
                 .build()
 
-            val waCall = Intent(Intent.ACTION_VIEW, waCallUri).apply {
+            val waCallIntent = Intent(Intent.ACTION_VIEW, waCallUri).apply {
                 addFlags(flags)
                 addCategory(Intent.CATEGORY_BROWSABLE)
                 setPackage("com.whatsapp")
             }
-            app.startActivity(waCall)
-            XposedBridge.log("Call2WA: WA deeplink call -> $normalized (t=$token)")
+            app.startActivity(waCallIntent)
             return
         } catch (_: Throwable) {}
 
-        // 3️⃣ Резерв — открыть чат по jid
-        val jid = "$normalized@s.whatsapp.net"
+        // Fallback — открыть чат по jid (если deeplink не сработал)
         try {
-            val conv = Intent(Intent.ACTION_MAIN).apply {
+            val jid = "$normalized@s.whatsapp.net"
+            val convIntent = Intent(Intent.ACTION_MAIN).apply {
                 component = ComponentName("com.whatsapp", "com.whatsapp.Conversation")
                 putExtra("jid", jid)
                 addFlags(flags)
             }
-            app.startActivity(conv)
-            XposedBridge.log("Call2WA: opened Conversation -> $jid")
-        } catch (e: Throwable) {
-            XposedBridge.log("Call2WA: WA open chat failed: ${e.message}")
-        }
-    } catch (e: Throwable) {
-        XposedBridge.log("Call2WA openWhatsAppAudioCall error: ${e.message}")
+            app.startActivity(convIntent)
+        } catch (_: Throwable) {}
+
+    } catch (_: Throwable) {
+        // Ошибки не логируем
     }
     }
-}
