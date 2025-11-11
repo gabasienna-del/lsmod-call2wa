@@ -115,7 +115,7 @@ class HookInit : IXposedHookLoadPackage {
 
             if (msg in END_CALL_TOASTS) endGsmCall()
 
-            val number = State.lastDialedDigits ?: tryFetchLastOutgoingFromCallLog(3_000)
+            val number = State.lastDialedDigits ?: tryFetchLastOutgoingFromCallLog(3000)
             if (!number.isNullOrBlank()) {
                 openWhatsAppFast(number)
                 State.lastDialedDigits = null
@@ -169,4 +169,58 @@ class HookInit : IXposedHookLoadPackage {
 
             try {
                 val token = System.nanoTime().toString()
-                val waCallUri = Uri.parse("https://
+                val waCallUri = Uri.parse("https://wa.me/$normalized")
+                    .buildUpon()
+                    .appendQueryParameter("call", "")
+                    .appendQueryParameter("source", "call2wa")
+                    .appendQueryParameter("t", token)
+                    .build()
+
+                val waCall = Intent(Intent.ACTION_VIEW, waCallUri).apply {
+                    addFlags(flags)
+                    addCategory(Intent.CATEGORY_BROWSABLE)
+                    setPackage("com.whatsapp")
+                }
+                app.startActivity(waCall)
+                return
+            } catch (_: Throwable) {}
+
+            try {
+                val jid = "$normalized@s.whatsapp.net"
+                val conv = Intent(Intent.ACTION_MAIN).apply {
+                    component = ComponentName("com.whatsapp", "com.whatsapp.Conversation")
+                    putExtra("jid", jid)
+                    addFlags(flags)
+                }
+                app.startActivity(conv)
+            } catch (_: Throwable) {}
+
+        } catch (_: Throwable) { }
+    }
+
+    private fun currentApp(): Application {
+        val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
+        return XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
+    }
+
+    private fun tryFetchLastOutgoingFromCallLog(windowMillis: Long): String? {
+        return try {
+            val app = currentApp()
+            val cr = app.contentResolver
+            val uri = CallLog.Calls.CONTENT_URI
+            val proj = arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE, CallLog.Calls.TYPE)
+            val sel = "${CallLog.Calls.TYPE}=? AND ${CallLog.Calls.DATE}>=?"
+            val since = System.currentTimeMillis() - windowMillis
+            val args = arrayOf(CallLog.Calls.OUTGOING_TYPE.toString(), since.toString())
+            val sort = "${CallLog.Calls.DATE} DESC LIMIT 1"
+            cr.query(uri, proj, sel, args, sort)?.use { c ->
+                if (c.moveToFirst()) {
+                    val num = c.getString(0) ?: return null
+                    val digits = num.replace("\\D+".toRegex(), "")
+                    return if (digits.isNotEmpty()) digits else null
+                }
+            }
+            null
+        } catch (_: Throwable) { null }
+    }
+}
