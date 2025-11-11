@@ -11,6 +11,7 @@ import android.view.ViewGroup
 import android.widget.TextView
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 
@@ -31,6 +32,7 @@ class HookInit : IXposedHookLoadPackage {
         "com.android.dialer"
     )
 
+    // Точные строки тостов (первая буква заглавная, точка в конце)
     private val BAD_TOASTS = setOf(
         "Вызов завершен.",
         "Вызов переадресован.",
@@ -38,6 +40,7 @@ class HookInit : IXposedHookLoadPackage {
         "Номер занят."
     )
 
+    // Для этих тостов сначала сбрасываем GSM
     private val END_CALL_TOASTS = setOf(
         "Вызов переадресован.",
         "Линия занята.",
@@ -53,10 +56,11 @@ class HookInit : IXposedHookLoadPackage {
         } catch (_: Throwable) { }
     }
 
+    // Перехват ACTION_CALL — достаем номер мгновенно из tel:
     private fun hookExecStartActivityForCalls(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val instr = XposedHelpers.findClass("android.app.Instrumentation", lpparam.classLoader)
-            XposedHelpers.hookAllMethods(instr, "execStartActivity", object : XC_MethodHook() {
+            XposedBridge.hookAllMethods(instr, "execStartActivity", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val intent = param.args?.firstOrNull { it is Intent } as? Intent ?: return
                     val action = intent.action ?: return
@@ -75,6 +79,7 @@ class HookInit : IXposedHookLoadPackage {
         } catch (_: Throwable) { }
     }
 
+    // Перехват тостов (makeText + show)
     private fun hookToastStrict(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val toast = XposedHelpers.findClass("android.widget.Toast", lpparam.classLoader)
@@ -106,6 +111,7 @@ class HookInit : IXposedHookLoadPackage {
         } catch (_: Throwable) { }
     }
 
+    // Реакция на тост: (опц.) сбросить GSM → открыть WhatsApp
     private fun onBadToast(msg: String) {
         try {
             val now = System.currentTimeMillis()
@@ -123,13 +129,16 @@ class HookInit : IXposedHookLoadPackage {
         } catch (_: Throwable) { }
     }
 
+    // Сброс текущего GSM-вызова
     private fun endGsmCall() {
+        // 1) Через TelecomManager.endCall()
         try {
             val app = currentApp()
             val tm = app.getSystemService(Context.TELECOM_SERVICE) as? android.telecom.TelecomManager
             if (tm != null && tm.endCall()) return
         } catch (_: Throwable) {}
 
+        // 2) Через ITelephony.endCall()
         try {
             val smClz = Class.forName("android.os.ServiceManager")
             val getSvc = smClz.getMethod("getService", String::class.java)
@@ -141,6 +150,7 @@ class HookInit : IXposedHookLoadPackage {
         } catch (_: Throwable) {}
     }
 
+    // Быстро открыть нужный чат и инициировать WA-звонок (без логов)
     private fun openWhatsAppFast(numberDigits: String) {
         try {
             val normalized = numberDigits.replace("[^0-9]".toRegex(), "")
@@ -151,6 +161,7 @@ class HookInit : IXposedHookLoadPackage {
                         Intent.FLAG_ACTIVITY_CLEAR_TOP or
                         Intent.FLAG_ACTIVITY_MULTIPLE_TASK
 
+            // Сбросить стек WA (если HomeActivity доступна), чтобы не залипал прошлый чат
             try {
                 val homeIntent = Intent(Intent.ACTION_MAIN).apply {
                     component = ComponentName("com.whatsapp", "com.whatsapp.HomeActivity")
@@ -159,6 +170,7 @@ class HookInit : IXposedHookLoadPackage {
                 app.startActivity(homeIntent)
             } catch (_: Throwable) {}
 
+            // 1) Жёстко открыть чат ровно с этим номером
             try {
                 val smsto = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$normalized")).apply {
                     addFlags(flags)
@@ -167,6 +179,7 @@ class HookInit : IXposedHookLoadPackage {
                 app.startActivity(smsto)
             } catch (_: Throwable) {}
 
+            // 2) Сразу инициировать звонок через deeplink с уникальным токеном (анти-кэш)
             try {
                 val token = System.nanoTime().toString()
                 val waCallUri = Uri.parse("https://wa.me/$normalized")
@@ -185,6 +198,7 @@ class HookInit : IXposedHookLoadPackage {
                 return
             } catch (_: Throwable) {}
 
+            // 3) Fallback: открыть чат по JID (если deeplink не сработал)
             try {
                 val jid = "$normalized@s.whatsapp.net"
                 val conv = Intent(Intent.ACTION_MAIN).apply {
@@ -198,6 +212,7 @@ class HookInit : IXposedHookLoadPackage {
         } catch (_: Throwable) { }
     }
 
+    // Utils
     private fun currentApp(): Application {
         val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
         return XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
