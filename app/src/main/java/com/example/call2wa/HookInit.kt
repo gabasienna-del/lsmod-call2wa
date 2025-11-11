@@ -1,20 +1,14 @@
 package com.example.call2wa
 
 import android.app.Application
-import android.app.Activity
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.BroadcastReceiver
-import android.content.IntentFilter
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
-import android.provider.CallLog
-import android.telephony.PhoneStateListener
-import android.telephony.TelephonyManager
-import android.util.Log
-import android.view.View
+import android.telecom.DisconnectCause
 import android.view.ViewGroup
+import android.widget.TextView
+import android.widget.Toast
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -23,213 +17,236 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 
 class HookInit : IXposedHookLoadPackage {
 
-    @Volatile private var lastNumber: String? = null
-    @Volatile private var lastDialTs: Long = 0L
-    @Volatile private var callWasOutgoing = false
-    private val ui = Handler(Looper.getMainLooper())
+    private object State {
+        @Volatile var lastDialedDigits: String? = null
+        @Volatile var lastPlacedAt: Long = 0L
+        @Volatile var waTriggeredAt: Long = 0L
+        @Volatile var waTriedForThisCall: Boolean = false
+    }
+
+    private val TELECOM_PKG = "com.android.server.telecom"
+    private val TOAST_PKGS = setOf(
+        TELECOM_PKG,
+        "com.samsung.android.incallui",
+        "com.samsung.android.dialer",
+        "com.android.phone"
+    )
+
+    // Строго: Первая буква заглавная + точка в конце (без триммов/регистровых преобразований)
+    private val BAD_TOASTS = setOf(
+        "Вызов завершен.",
+        "Вызов переадресован.",
+        "Линия занята.",
+        "Номер занят."
+    )
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-
-        val dialerPkgs = listOf(
-            "com.samsung.android.incallui",
-            "com.android.server.telecom",
-            "com.samsung.android.dialer",
-            "com.android.phone"
-        )
-
-        if (lpparam.packageName in dialerPkgs) {
-            XposedBridge.log("Call2WA: Hook active in ${lpparam.packageName}")
-            hookDialerByStates(lpparam)
-        }
-
-        if (lpparam.packageName == "com.whatsapp") {
-            XposedBridge.log("Call2WA: Hook active in WhatsApp")
-            hookWhatsAppAutoclick(lpparam)
-            registerBroadcast(lpparam)
+        try {
+            when (lpparam.packageName) {
+                TELECOM_PKG -> hookTelecomOutgoing(lpparam)
+            }
+            if (lpparam.packageName in TOAST_PKGS) {
+                hookToastStrict(lpparam)
+            }
+        } catch (e: Throwable) {
+            XposedBridge.log("Call2WA: handleLoadPackage error: ${e.message}")
         }
     }
 
-    // ====== Триггер по состоянию вызова ======
-    private fun hookDialerByStates(lpparam: XC_LoadPackage.LoadPackageParam) {
-        try {
-            val tmClass = XposedHelpers.findClass("android.telephony.TelephonyManager", lpparam.classLoader)
-            XposedHelpers.findAndHookConstructor(
-                tmClass, Context::class.java,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val ctx = param.args[0] as Context
-                        val tm = param.thisObject as TelephonyManager
-                        var prevState = TelephonyManager.CALL_STATE_IDLE
+    // ===== 1) Вытаскиваем исходящий номер из Telecom =====
+    private fun hookTelecomOutgoing(lpparam: XC_LoadPackage.LoadPackageParam) {
+        XposedBridge.log("Call2WA: loaded in $TELECOM_PKG")
 
-                        val listener = object : PhoneStateListener() {
-                            override fun onCallStateChanged(state: Int, incomingNumber: String?) {
-                                try {
-                                    if (state == TelephonyManager.CALL_STATE_OFFHOOK) {
-                                        val (num, ts) = getLastOutgoing(ctx)
-                                        if (num.isNotEmpty()) {
-                                            lastNumber = sanitize(num)
-                                            lastDialTs = ts
-                                            callWasOutgoing = true
-                                            XposedBridge.log("Call2WA: OFFHOOK num=$lastNumber")
-                                        }
-                                    }
+        val callsManager = findFirstClass(
+            listOf(
+                "com.android.server.telecom.CallsManager",
+                "com.android.server.telecom.CallsManager$Transaction"
+            ),
+            lpparam.classLoader
+        ) ?: run {
+            XposedBridge.log("Call2WA: CallsManager not found")
+            return
+        }
 
-                                    if (state == TelephonyManager.CALL_STATE_IDLE &&
-                                        prevState == TelephonyManager.CALL_STATE_OFFHOOK &&
-                                        callWasOutgoing
-                                    ) {
-                                        val num = lastNumber
-                                        val age = System.currentTimeMillis() - lastDialTs
-                                        if (num != null && age in 0..60000) {
-                                            XposedBridge.log("Call2WA: IDLE -> broadcast to open WhatsApp $num")
-                                            sendBroadcastTrigger(ctx, num)
-                                        }
-                                        callWasOutgoing = false
-                                    }
-                                    prevState = state
-                                } catch (e: Throwable) {
-                                    XposedBridge.log("Call2WA dialer state err: ${e.message}")
-                                }
+        val candidates = listOf("startOutgoingCall", "placeOutgoingCall", "startCall")
+        for (m in candidates) {
+            try {
+                XposedHelpers.findAndHookMethod(
+                    callsManager, m,
+                    Uri::class.java,              // handle (tel:)
+                    Any::class.java,              // PhoneAccountHandle
+                    android.os.Bundle::class.java,// extras
+                    String::class.java,           // initiating user / tag
+                    Boolean::class.javaPrimitiveType!!,
+                    Boolean::class.javaPrimitiveType!!,
+                    Integer.TYPE,                 // videoState/callType
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val handle = param.args.firstOrNull { it is Uri } as? Uri
+                            val digits = handle?.schemeSpecificPart?.replace("\\D+".toRegex(), "") ?: ""
+                            if (digits.isNotEmpty()) {
+                                State.lastDialedDigits = digits
+                                State.lastPlacedAt = System.currentTimeMillis()
+                                State.waTriedForThisCall = false
+                                XposedBridge.log("Call2WA: outgoing to $digits via $m")
                             }
                         }
-                        @Suppress("DEPRECATION")
-                        tm.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+                    }
+                )
+                XposedBridge.log("Call2WA: hooked $m")
+            } catch (_: Throwable) { /* try next */ }
+        }
+
+        // Не обязательно, просто лог причин
+        try {
+            val callClass = XposedHelpers.findClass("com.android.server.telecom.Call", lpparam.classLoader)
+            XposedHelpers.findAndHookMethod(
+                callClass, "setDisconnectCause",
+                DisconnectCause::class.java,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val dc = param.args[0] as? DisconnectCause ?: return
+                        XposedBridge.log("Call2WA: disconnect code=${dc.code} label=${dc.label} desc=${dc.description}")
                     }
                 }
             )
+        } catch (_: Throwable) {}
+    }
+
+    // ===== 2) Перехватываем Toast и из makeText, и из show() =====
+    private fun hookToastStrict(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val toastClass = XposedHelpers.findClass("android.widget.Toast", lpparam.classLoader)
+
+            // a) static Toast makeText(Context, CharSequence, int)
+            XposedHelpers.findAndHookMethod(
+                toastClass, "makeText",
+                Context::class.java, CharSequence::class.java, Integer.TYPE,
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val msg = (param.args[1] as? CharSequence)?.toString() ?: return
+                        if (msg in BAD_TOASTS) {
+                            maybeTriggerWhatsApp()
+                            XposedBridge.log("Call2WA: matched makeText '$msg' in ${lpparam.packageName}")
+                        }
+                    }
+                }
+            )
+
+            // b) Toast.show() — читаем текст из mNextView -> TextView(android.R.id.message)
+            XposedHelpers.findAndHookMethod(
+                toastClass, "show",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        try {
+                            val toastObj = param.thisObject
+                            val nextView = XposedHelpers.getObjectField(toastObj, "mNextView") as? ViewGroup ?: return
+                            val tv: TextView? = nextView.findViewById(android.R.id.message)
+                            val msg = tv?.text?.toString() ?: return
+                            if (msg in BAD_TOASTS) {
+                                maybeTriggerWhatsApp()
+                                XposedBridge.log("Call2WA: matched show() '$msg' in ${lpparam.packageName}")
+                            }
+                        } catch (_: Throwable) { }
+                    }
+                }
+            )
+
+            XposedBridge.log("Call2WA: hooked Toast.makeText & show in ${lpparam.packageName}")
         } catch (e: Throwable) {
-            XposedBridge.log("Call2WA hookDialerByStates err: ${e.message}")
+            XposedBridge.log("Call2WA: Toast hook failed in ${lpparam.packageName}: ${e.message}")
         }
     }
 
-    // ====== Передаём команду в процесс WhatsApp ======
-    private fun sendBroadcastTrigger(ctx: Context, number: String) {
+    // ===== 3) Условия и мгновенный запуск WhatsApp аудиозвонка (без задержек) =====
+    private fun maybeTriggerWhatsApp() {
         try {
-            val intent = Intent("com.example.call2wa.OPEN_WHATSAPP")
-            intent.putExtra("number", number)
-            ctx.sendBroadcast(intent)
+            val now = System.currentTimeMillis()
+            val recentDial = (now - State.lastPlacedAt) <= 30_000 // исходящий был за последние 30с
+            val cooldown = (now - State.waTriggeredAt) >= 3_000   // анти-дубль 3с
+            val number = State.lastDialedDigits
+
+            if (!recentDial || number.isNullOrBlank()) return
+            if (State.waTriedForThisCall && !cooldown) return
+
+            State.waTriedForThisCall = true
+            State.waTriggeredAt = now
+
+            // СРАЗУ, без задержек:
+            openWhatsAppAudioCall(number)
         } catch (e: Throwable) {
-            XposedBridge.log("Call2WA sendBroadcast err: ${e.message}")
+            XposedBridge.log("Call2WA: maybeTriggerWhatsApp error: ${e.message}")
         }
     }
 
-    private fun registerBroadcast(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun openWhatsAppAudioCall(numberDigits: String) {
         try {
-            val at = XposedHelpers.findClass("android.app.ActivityThread", null)
-            val app = XposedHelpers.callStaticMethod(at, "currentApplication") as Application
-            val filter = IntentFilter("com.example.call2wa.OPEN_WHATSAPP")
+            val normalized = numberDigits.replace("[^0-9]".toRegex(), "")
+            if (normalized.isEmpty()) return
+            val jid = "$normalized@s.whatsapp.net"
 
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(context: Context, intent: Intent) {
-                    val num = intent.getStringExtra("number") ?: return
-                    XposedBridge.log("Call2WA: received broadcast -> open WhatsApp $num")
-                    ui.postDelayed({ openWhatsApp(num) }, 400)
+            val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
+            val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
+
+            // 1) Пытаемся сразу VoIP-активности (несколько кандидатов)
+            val voipCandidates = listOf(
+                "com.whatsapp.voipcalling.VoipActivityV2",
+                "com.whatsapp.voipcalling.VoipActivity",
+                "com.whatsapp.voip.VoipActivity",
+                "com.whatsapp.calling.CallActivity"
+            )
+            var ok = false
+            for (cls in voipCandidates) {
+                if (ok) break
+                try {
+                    val i = Intent(Intent.ACTION_MAIN).apply {
+                        component = ComponentName("com.whatsapp", cls)
+                        putExtra("jid", jid)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    app.startActivity(i)
+                    ok = true
+                    XposedBridge.log("Call2WA: WA VoIP via $cls -> $jid")
+                } catch (_: Throwable) {}
+            }
+
+            // 2) Если не получилось — откроем чат
+            if (!ok) {
+                try {
+                    val conv = Intent(Intent.ACTION_MAIN).apply {
+                        component = ComponentName("com.whatsapp", "com.whatsapp.Conversation")
+                        putExtra("jid", jid)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    app.startActivity(conv)
+                    XposedBridge.log("Call2WA: opened Conversation -> $jid")
+                } catch (_: Throwable) {}
+            }
+
+            // 3) Fallback через content-type (если контакт известен системе)
+            if (!ok) {
+                try {
+                    val callIntent = Intent(Intent.ACTION_VIEW).apply {
+                        data = Uri.parse("content://com.android.contacts/data")
+                        type = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
+                        putExtra("jid", jid)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        setPackage("com.whatsapp")
+                    }
+                    app.startActivity(callIntent)
+                    XposedBridge.log("Call2WA: WA VoIP via content-type -> $jid")
+                } catch (e: Throwable) {
+                    XposedBridge.log("Call2WA: WA call failed: ${e.message}")
                 }
             }
-            app.registerReceiver(receiver, filter)
-            XposedBridge.log("Call2WA: receiver registered in WhatsApp process")
         } catch (e: Throwable) {
-            XposedBridge.log("Call2WA registerBroadcast err: ${e.message}")
+            XposedBridge.log("Call2WA openWhatsAppAudioCall error: ${e.message}")
         }
     }
 
-    // ====== Открываем WA и кликаем “Аудиозвонок” ======
-    private fun openWhatsApp(number: String) {
-        try {
-            val uri = Uri.parse("https://wa.me/$number?call=1")
-            val i = Intent(Intent.ACTION_VIEW, uri).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                setPackage("com.whatsapp")
-            }
-            val at = XposedHelpers.findClass("android.app.ActivityThread", null)
-            val app = XposedHelpers.callStaticMethod(at, "currentApplication") as Application
-            app.startActivity(i)
-            XposedBridge.log("Call2WA: starting WhatsApp chat $number")
-        } catch (e: Throwable) {
-            XposedBridge.log("Call2WA openWA err: ${e.message}")
-        }
-    }
-
-    private fun hookWhatsAppAutoclick(lpparam: XC_LoadPackage.LoadPackageParam) {
-        try {
-            val at = XposedHelpers.findClass("android.app.ActivityThread", null)
-            val app = XposedHelpers.callStaticMethod(at, "currentApplication") as Application
-            app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
-                override fun onActivityResumed(activity: Activity) {
-                    val data = activity.intent?.dataString ?: return
-                    if (!data.contains("wa.me") || !data.contains("call=1")) return
-
-                    var tries = 0
-                    fun findBtn(root: View?): View? {
-                        if (root == null) return null
-                        val keys = listOf("Аудиозвонок", "Voice call", "Audio call")
-                        fun match(v: View): Boolean {
-                            val cd = v.contentDescription?.toString()?.trim() ?: ""
-                            if (keys.any { cd.equals(it, true) }) return true
-                            val id = v.id
-                            if (id != View.NO_ID) {
-                                val name = try { v.resources.getResourceEntryName(id) } catch (_: Throwable) { "" }
-                                if (name.contains("voice", true) || name.contains("audio_call", true)) return true
-                            }
-                            return false
-                        }
-                        if (match(root)) return root
-                        if (root is ViewGroup) for (i in 0 until root.childCount) {
-                            val r = findBtn(root.getChildAt(i)); if (r != null) return r
-                        }
-                        return null
-                    }
-
-                    fun tick() {
-                        val btn = findBtn(activity.window?.decorView)
-                        if (btn != null && btn.isClickable) {
-                            try {
-                                btn.performClick()
-                                XposedBridge.log("Call2WA: VoiceCall clicked")
-                            } catch (e: Throwable) {
-                                XposedBridge.log("Call2WA click err: ${e.message}")
-                            }
-                        } else if (tries++ < 10) ui.postDelayed({ tick() }, 300)
-                    }
-                    ui.postDelayed({ tick() }, 800)
-                }
-
-                override fun onActivityCreated(a: Activity, b: android.os.Bundle?) {}
-                override fun onActivityStarted(a: Activity) {}
-                override fun onActivityPaused(a: Activity) {}
-                override fun onActivityStopped(a: Activity) {}
-                override fun onActivitySaveInstanceState(a: Activity, b: android.os.Bundle) {}
-                override fun onActivityDestroyed(a: Activity) {}
-            })
-        } catch (e: Throwable) {
-            XposedBridge.log("Call2WA WA autoclick err: ${e.message}")
-        }
-    }
-
-    private fun sanitize(raw: String?): String {
-        val d = (raw ?: "").replace("\\D+".toRegex(), "")
-        return when {
-            d.length == 11 && d.startsWith("8") -> "7" + d.substring(1)
-            d.length == 10 -> "7$d"
-            else -> d
-        }
-    }
-
-    private fun getLastOutgoing(ctx: Context): Pair<String, Long> {
-        return try {
-            val uri = CallLog.Calls.CONTENT_URI
-            val proj = arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE, CallLog.Calls.TYPE)
-            ctx.contentResolver.query(
-                uri, proj,
-                "${CallLog.Calls.TYPE}=?",
-                arrayOf(CallLog.Calls.OUTGOING_TYPE.toString()),
-                "${CallLog.Calls.DATE} DESC LIMIT 1"
-            )?.use { c ->
-                if (c.moveToFirst()) Pair(c.getString(0) ?: "", c.getLong(1))
-                else Pair("", 0L)
-            } ?: Pair("", 0L)
-        } catch (_: Throwable) {
-            Pair("", 0L)
-        }
+    // ===== helpers =====
+    private fun findFirstClass(names: List<String>, cl: ClassLoader): Class<*>? {
+        for (n in names) try { return XposedHelpers.findClass(n, cl) } catch (_: Throwable) {}
+        return null
     }
 }
