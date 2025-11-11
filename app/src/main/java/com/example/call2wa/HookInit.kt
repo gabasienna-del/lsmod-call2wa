@@ -1,11 +1,13 @@
 package com.example.call2wa
 
+import android.app.Activity
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
+import android.os.Bundle
 import android.os.IBinder
 import android.provider.CallLog
 import android.telecom.DisconnectCause
@@ -21,8 +23,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 class HookInit : IXposedHookLoadPackage {
 
     private object State {
-        @Volatile var lastDialedDigits: String? = null
-        @Volatile var lastPlacedAt: Long = 0L
+        @Volatile var lastDialedDigits: String? = null     // последний набранный (tel:)
+        @Volatile var lastPlacedAt: Long = 0L              // когда его поймали
         @Volatile var waTriggeredAt: Long = 0L
         @Volatile var waTriedForThisCall: Boolean = false
     }
@@ -35,7 +37,7 @@ class HookInit : IXposedHookLoadPackage {
         "com.android.phone"
     )
 
-    // Точные строки (первая буква заглавная, точка в конце)
+    // Строго: первая буква заглавная, точка в конце
     private val BAD_TOASTS = setOf(
         "Вызов завершен.",
         "Вызов переадресован.",
@@ -43,7 +45,7 @@ class HookInit : IXposedHookLoadPackage {
         "Номер занят."
     )
 
-    // Эти тосты: сбрасываем GSM и сразу идём в WhatsApp
+    // Эти тосты → сначала сброс GSM, затем WA
     private val END_CALL_TOASTS = setOf(
         "Вызов переадресован.",
         "Линия занята.",
@@ -52,16 +54,56 @@ class HookInit : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
-            if (lpparam.packageName == TELECOM_PKG) hookTelecomOutgoingStrong(lpparam)
-            if (lpparam.packageName in TOAST_PKGS) hookToastStrict(lpparam)
+            // 1) В системном telecom — ловим исходящий из внутренних вызовов
+            if (lpparam.packageName == TELECOM_PKG) {
+                hookTelecomOutgoingStrong(lpparam)
+            }
+
+            // 2) Во всех указанных пакетах:
+            if (lpparam.packageName in TOAST_PKGS) {
+                // 2a) Ловим Тосты (makeText + show)
+                hookToastStrict(lpparam)
+                // 2b) Самое важное: перехватываем запуск ACTION_CALL, чтобы вытащить номер сразу из Intent
+                hookExecStartActivityForCalls(lpparam)
+            }
         } catch (e: Throwable) {
             XposedBridge.log("Call2WA: handleLoadPackage error: ${e.message}")
         }
     }
 
-    // ===== 1) Надёжный захват исходящего номера из Telecom =====
+    // ===== Перехват запуска исходящего звонка (ACTION_CALL) — надёжно достаём номер из tel: =====
+    private fun hookExecStartActivityForCalls(lpparam: XC_LoadPackage.LoadPackageParam) {
+        try {
+            val instrClass = XposedHelpers.findClass("android.app.Instrumentation", lpparam.classLoader)
+            // На разных версиях много перегрузок. Перехватываем ВСЕ execStartActivity и ищем Intent среди аргументов.
+            XposedBridge.hookAllMethods(instrClass, "execStartActivity", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val intent = param.args?.firstOrNull { it is Intent } as? Intent ?: return
+                    val action = intent.action ?: return
+                    if (action == Intent.ACTION_CALL || action == "android.intent.action.CALL_PRIVILEGED") {
+                        val data = intent.data
+                        if (data != null && data.scheme == "tel") {
+                            val digits = data.schemeSpecificPart?.replace("\\D+".toRegex(), "") ?: ""
+                            if (digits.isNotEmpty()) {
+                                State.lastDialedDigits = digits
+                                State.lastPlacedAt = System.currentTimeMillis()
+                                State.waTriedForThisCall = false
+                                XposedBridge.log("Call2WA: captured from ACTION_CALL -> $digits (pkg=${lpparam.packageName})")
+                            }
+                        }
+                    }
+                }
+            })
+            XposedBridge.log("Call2WA: hooked Instrumentation.execStartActivity in ${lpparam.packageName}")
+        } catch (e: Throwable) {
+            XposedBridge.log("Call2WA: hook execStartActivity failed in ${lpparam.packageName}: ${e.message}")
+        }
+    }
+
+    // ===== Исходящий номер из Telecom (доп. источник) =====
     private fun hookTelecomOutgoingStrong(lpparam: XC_LoadPackage.LoadPackageParam) {
         XposedBridge.log("Call2WA: loaded in $TELECOM_PKG")
+
         val cmClass = try { XposedHelpers.findClass("com.android.server.telecom.CallsManager", lpparam.classLoader) } catch (_: Throwable) { null }
         if (cmClass != null) {
             hookAllMethodsGrabUri(cmClass, "startOutgoingCall")
@@ -78,14 +120,14 @@ class HookInit : IXposedHookLoadPackage {
                         saveDigitsFromUri("setHandle", uri)
                     }
                 })
-            } catch (_: Throwable) { }
+            } catch (_: Throwable) {}
             try {
                 XposedBridge.hookAllConstructors(callClass, object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         param.args?.forEach { a -> if (a is Uri) saveDigitsFromUri("Call::<init>", a) }
                     }
                 })
-            } catch (_: Throwable) { }
+            } catch (_: Throwable) {}
         }
     }
 
@@ -106,7 +148,7 @@ class HookInit : IXposedHookLoadPackage {
                     }
                 }
             })
-        } catch (_: Throwable) { }
+        } catch (_: Throwable) {}
     }
 
     private fun saveDigitsFromUri(tag: String, uri: Uri?) {
@@ -120,12 +162,11 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ===== 2) Перехват Toast (и makeText, и show) =====
+    // ===== Тосты (makeText + show) =====
     private fun hookToastStrict(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val toastClass = XposedHelpers.findClass("android.widget.Toast", lpparam.classLoader)
 
-            // makeText
             XposedHelpers.findAndHookMethod(
                 toastClass, "makeText",
                 Context::class.java, CharSequence::class.java, Integer.TYPE,
@@ -141,7 +182,6 @@ class HookInit : IXposedHookLoadPackage {
                 }
             )
 
-            // show()
             XposedHelpers.findAndHookMethod(
                 toastClass, "show",
                 object : XC_MethodHook() {
@@ -159,10 +199,10 @@ class HookInit : IXposedHookLoadPackage {
                     }
                 }
             )
-        } catch (_: Throwable) { }
+        } catch (_: Throwable) {}
     }
 
-    // ===== 3) Триггер: при нужных тостах сбрасываем GSM и сразу WhatsApp =====
+    // ===== Триггер: при нужных тостах — сброс GSM и сразу WA =====
     private fun maybeTriggerWhatsApp(lpparam: XC_LoadPackage.LoadPackageParam, endFirst: Boolean) {
         try {
             val now = System.currentTimeMillis()
@@ -174,13 +214,14 @@ class HookInit : IXposedHookLoadPackage {
 
             if (endFirst) endGsmCall()
 
-            // Ищем самый свежий исходящий в CallLog за 3 секунды (НЕ задержка!)
-            val freshFromLog = tryFetchLastOutgoingFromCallLog(windowMillis = 3_000)
-            val candidate = when {
-                !freshFromLog.isNullOrBlank() -> freshFromLog
-                !State.lastDialedDigits.isNullOrBlank() -> State.lastDialedDigits
-                else -> null
+            // 1) Берём номер из State (пойман при ACTION_CALL)
+            var candidate = State.lastDialedDigits
+
+            // 2) Если вдруг пусто — попробуем CallLog:
+            if (candidate.isNullOrBlank()) {
+                candidate = tryFetchLastOutgoingFromCallLog(3_000) ?: tryFetchLastOutgoingFromCallLog(20_000)
             }
+
             if (candidate.isNullOrBlank()) {
                 XposedBridge.log("Call2WA: skip — number unknown")
                 return
@@ -188,7 +229,8 @@ class HookInit : IXposedHookLoadPackage {
 
             XposedBridge.log("Call2WA: triggering WA for $candidate")
             openWhatsAppAudioCall(candidate)
-            // Сбросим, чтобы не прилипал прошлый номер на следующий тост
+
+            // Сбросим, чтобы не прилипал старый номер
             State.lastDialedDigits = null
         } catch (e: Throwable) {
             XposedBridge.log("Call2WA: maybeTriggerWhatsApp error: ${e.message}")
@@ -197,7 +239,7 @@ class HookInit : IXposedHookLoadPackage {
 
     // Сброс текущего GSM-вызова
     private fun endGsmCall() {
-        // 1) Через TelecomManager.endCall()
+        // 1) TelecomManager.endCall()
         try {
             val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
             val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
@@ -211,7 +253,7 @@ class HookInit : IXposedHookLoadPackage {
             XposedBridge.log("Call2WA: endCall via TelecomManager failed: ${e.message}")
         }
 
-        // 2) Через ITelephony.endCall()
+        // 2) ITelephony.endCall()
         try {
             val smClz = Class.forName("android.os.ServiceManager")
             val getSvc = smClz.getMethod("getService", String::class.java)
@@ -226,7 +268,7 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    private fun tryFetchLastOutgoingFromCallLog(windowMillis: Long = 120_000): String? {
+    private fun tryFetchLastOutgoingFromCallLog(windowMillis: Long): String? {
         return try {
             val ctxClass = XposedHelpers.findClass("android.app.ActivityThread", null)
             val app = XposedHelpers.callStaticMethod(ctxClass, "currentApplication") as Application
@@ -247,11 +289,11 @@ class HookInit : IXposedHookLoadPackage {
             null
         } catch (e: Throwable) {
             XposedBridge.log("Call2WA: CallLog query failed: ${e.message}")
-            return null
+            null
         }
     }
 
-    // ===== 4) Запуск WhatsApp звонка/чата (без задержек) =====
+    // ===== Запуск WhatsApp звонка/чата (без задержек) =====
     private fun openWhatsAppAudioCall(numberDigits: String) {
         try {
             val normalized = numberDigits.replace("[^0-9]".toRegex(), "")
