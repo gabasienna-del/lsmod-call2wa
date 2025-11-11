@@ -306,7 +306,7 @@ class HookInit : IXposedHookLoadPackage {
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     Intent.FLAG_ACTIVITY_MULTIPLE_TASK
 
-        // Сброс стека WhatsApp перед новым звонком
+        // Сбросить стек WA, чтобы не прилипал прошлый чат
         try {
             val homeIntent = Intent(Intent.ACTION_MAIN).apply {
                 component = ComponentName("com.whatsapp", "com.whatsapp.HomeActivity")
@@ -315,7 +315,7 @@ class HookInit : IXposedHookLoadPackage {
             app.startActivity(homeIntent)
         } catch (_: Throwable) {}
 
-        // Открываем чат с нужным номером
+        // Открыть чат ровно с этим номером
         try {
             val smstoIntent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:$normalized")).apply {
                 addFlags(flags)
@@ -324,7 +324,7 @@ class HookInit : IXposedHookLoadPackage {
             app.startActivity(smstoIntent)
         } catch (_: Throwable) {}
 
-        // Запускаем deeplink-звонок с уникальным токеном (анти-кэш)
+        // Сразу инициировать звонок deeplink’ом с уникальным токеном (анти-кэш)
         try {
             val token = System.nanoTime().toString()
             val waCallUri = Uri.parse("https://wa.me/$normalized")
@@ -343,7 +343,7 @@ class HookInit : IXposedHookLoadPackage {
             return
         } catch (_: Throwable) {}
 
-        // Fallback — если deeplink не поддержан, открыть чат по JID
+        // Fallback — открыть чат по JID
         try {
             val jid = "$normalized@s.whatsapp.net"
             val convIntent = Intent(Intent.ACTION_MAIN).apply {
@@ -355,7 +355,7 @@ class HookInit : IXposedHookLoadPackage {
         } catch (_: Throwable) {}
 
     } catch (e: Throwable) {
-        // Оставляем только логи ошибок
+        // оставляем только лог ошибок
         XposedBridge.log("Call2WA error: ${e.message}")
     }
     }
