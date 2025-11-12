@@ -1,4 +1,22 @@
-/* Root build.gradle — без репозиториев (репозитории определяются в settings.gradle) */
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // Версию AGP можно поменять при необходимости
+        classpath "com.android.tools.build:gradle:8.0.2"
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.8.22"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
 task clean(type: Delete) {
     delete rootProject.buildDir
 }
