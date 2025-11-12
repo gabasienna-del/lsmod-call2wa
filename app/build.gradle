@@ -15,7 +15,6 @@ android {
     versionName "1.0"
   }
 
-  // === ВЫРАВНИВАЕМ JAVA/KOTLIN НА 17 ===
   compileOptions {
     sourceCompatibility JavaVersion.VERSION_17
     targetCompatibility JavaVersion.VERSION_17
@@ -32,6 +31,6 @@ android {
 }
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.10"
-    compileOnly files("libs/api-82.jar")
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.10"
+  compileOnly files("libs/api-82.jar")
 }
