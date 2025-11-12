@@ -6,8 +6,8 @@ import android.os.Handler
 import android.os.Looper
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
-import android.util.Log
 import android.widget.Toast
+import android.util.Log
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -37,16 +37,20 @@ class HookInit : IXposedHookLoadPackage {
         XposedBridge.log("Call2WA: loaded in ${lpparam.packageName}")
 
         try {
-            if (lpparam.packageName == "com.android.phone" ||
-                lpparam.packageName == "com.samsung.android.dialer" ||
-                lpparam.packageName == "com.samsung.android.incallui" ||
-                lpparam.packageName == "com.samsung.android.incall.contentprovider" ||
-                lpparam.packageName == "com.samsung.android.smartcallprovider") {
+            if (lpparam.packageName in listOf(
+                    "com.android.phone",
+                    "com.samsung.android.dialer",
+                    "com.samsung.android.incallui",
+                    "com.samsung.android.incall.contentprovider",
+                    "com.samsung.android.smartcallprovider"
+                )) {
                 hookPhoneSide(lpparam)
             }
 
-            if (lpparam.packageName == "com.android.server.telecom" ||
-                lpparam.packageName == "com.samsung.android.server.telecom") {
+            if (lpparam.packageName in listOf(
+                    "com.android.server.telecom",
+                    "com.samsung.android.server.telecom"
+                )) {
                 hookTelecomSide(lpparam)
             }
         } catch (e: Throwable) {
@@ -54,7 +58,7 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ---------------- phone side ----------------
+    // ---------------- PHONE SIDE ----------------
     private fun hookPhoneSide(lpparam: XC_LoadPackage.LoadPackageParam) {
         try {
             val tmClass = XposedHelpers.findClass("android.telephony.TelephonyManager", lpparam.classLoader)
@@ -65,23 +69,20 @@ class HookInit : IXposedHookLoadPackage {
 
                     val listener = object : PhoneStateListener() {
                         override fun onCallStateChanged(state: Int, incomingNumber: String?) {
-                            // OFFHOOK -> IDLE: показываем сразу первый Toast + finish+openWA,
-                            // затем показываем остальные три сообщения последовательно (без повторного открытия WA)
                             if (lastCallState == TelephonyManager.CALL_STATE_OFFHOOK &&
                                 state == TelephonyManager.CALL_STATE_IDLE) {
 
-                                // 1) первый — finish+open (Вызов завершен.)
+                                // Основное событие OFFHOOK -> IDLE
                                 finishCallAndOpenWA(ctx, "Вызов завершен.")
 
-                                // 2) остальные тосты только для показа (без повторного finish/open)
                                 mainHandler.postDelayed({
-                                    try { Toast.makeText(ctx, "Вызов переадресован.", Toast.LENGTH_SHORT).show() } catch (_: Throwable) {}
+                                    showToast(ctx, "Вызов переадресован.")
                                 }, 350)
                                 mainHandler.postDelayed({
-                                    try { Toast.makeText(ctx, "Линия занята.", Toast.LENGTH_SHORT).show() } catch (_: Throwable) {}
+                                    showToast(ctx, "Линия занята.")
                                 }, 700)
                                 mainHandler.postDelayed({
-                                    try { Toast.makeText(ctx, "Номер занят.", Toast.LENGTH_SHORT).show() } catch (_: Throwable) {}
+                                    showToast(ctx, "Номер занят.")
                                 }, 1050)
                             }
                             lastCallState = state
@@ -89,11 +90,7 @@ class HookInit : IXposedHookLoadPackage {
 
                         @Suppress("OVERRIDE_DEPRECATION")
                         override fun onCallForwardingIndicatorChanged(cfi: Boolean) {
-                            if (cfi) {
-                                val ctx2 = appContext()
-                                // при индикаторе переадресации сразу действуем
-                                finishCallAndOpenWA(ctx2, "Вызов переадресован.")
-                            }
+                            if (cfi) finishCallAndOpenWA(ctx, "Вызов переадресован.")
                         }
                     }
 
@@ -104,7 +101,7 @@ class HookInit : IXposedHookLoadPackage {
                                 PhoneStateListener.LISTEN_CALL_FORWARDING_INDICATOR
                     )
 
-                    // Ловим последний исходящий номер
+                    // перехватываем последний исходящий номер
                     try {
                         val outFilter = IntentFilter(Intent.ACTION_NEW_OUTGOING_CALL)
                         val outReceiver = object : BroadcastReceiver() {
@@ -127,7 +124,7 @@ class HookInit : IXposedHookLoadPackage {
         }
     }
 
-    // ---------------- telecom side ----------------
+    // ---------------- TELECOM SIDE ----------------
     private fun hookTelecomSide(lpparam: XC_LoadPackage.LoadPackageParam) {
         val ctx by lazy { appContext() }
 
@@ -137,7 +134,7 @@ class HookInit : IXposedHookLoadPackage {
             "com.android.server.telecom.Call$Call"
         )
 
-        var hookedAny = false
+        var hooked = false
 
         for (clazz in callClassNames) {
             try {
@@ -149,41 +146,30 @@ class HookInit : IXposedHookLoadPackage {
                         XposedHelpers.findClass("android.telecom.DisconnectCause", lpparam.classLoader),
                         object : XC_MethodHook() {
                             override fun beforeHookedMethod(param: MethodHookParam) {
-                                try {
-                                    handleDisconnectCause(param.args.getOrNull(0), ctx, lpparam)
-                                } catch (t: Throwable) {
-                                    XposedBridge.log("Call2WA: setDisconnectCause hook error: ${t.message}")
-                                }
+                                handleDisconnectCause(param.args.getOrNull(0), ctx, lpparam)
                             }
                         }
                     )
-                    hookedAny = true
+                    hooked = true
                     XposedBridge.log("Call2WA: hooked $clazz#setDisconnectCause")
-                }.onFailure { /* ignore */ }
+                }
 
                 runCatching {
                     XposedHelpers.findAndHookMethod(callClass, "disconnect", object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
-                            try {
-                                val cause = runCatching { XposedHelpers.callMethod(param.thisObject, "getDisconnectCause") }.getOrNull()
-                                handleDisconnectCause(cause, ctx, lpparam)
-                            } catch (_: Throwable) { /* ignore */ }
+                            val cause = runCatching {
+                                XposedHelpers.callMethod(param.thisObject, "getDisconnectCause")
+                            }.getOrNull()
+                            handleDisconnectCause(cause, ctx, lpparam)
                         }
                     })
-                    hookedAny = true
+                    hooked = true
                     XposedBridge.log("Call2WA: hooked $clazz#disconnect")
-                }.onFailure { /* ignore */ }
-
-            } catch (e: Throwable) {
-                // пробуем следующий класс
-            }
+                }
+            } catch (_: Throwable) {}
         }
 
-        if (!hookedAny) {
-            XposedBridge.log("Call2WA: Telecom Call hook NOT attached (Call class not found in ${lpparam.packageName})")
-        } else {
-            XposedBridge.log("Call2WA: Telecom side hooks installed for ${lpparam.packageName}")
-        }
+        if (!hooked) XposedBridge.log("Call2WA: Telecom Call hook NOT attached in ${lpparam.packageName}")
     }
 
     private fun handleDisconnectCause(causeObj: Any?, ctx: Context, lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -195,81 +181,61 @@ class HookInit : IXposedHookLoadPackage {
             val CONGESTION = XposedHelpers.getStaticIntField(dcClass, "CONGESTION")
 
             when (code) {
-                BUSY -> {
-                    XposedBridge.log("Call2WA: DisconnectCause=BUSY")
-                    finishCallAndOpenWA(ctx, "Номер занят.")
-                }
-                CONGESTION -> {
-                    XposedBridge.log("Call2WA: DisconnectCause=CONGESTION")
-                    finishCallAndOpenWA(ctx, "Линия занята.")
-                }
-                else -> {
-                    // игнор
-                }
+                BUSY -> finishCallAndOpenWA(ctx, "Номер занят.")
+                CONGESTION -> finishCallAndOpenWA(ctx, "Линия занята.")
             }
         } catch (e: Throwable) {
             XposedBridge.log("Call2WA handleDisconnectCause error: ${e.message}")
         }
     }
 
-    // ---------------- helpers ----------------
+    // ---------------- HELPERS ----------------
     private fun appContext(): Context {
         val at = XposedHelpers.findClass("android.app.ActivityThread", null)
         val app = XposedHelpers.callStaticMethod(at, "currentApplication") as? android.app.Application
         return app?.applicationContext ?: throw IllegalStateException("No application")
     }
 
-    /**
-     * Попытаться завершить текущий вызов (TelecomManager.endCall() и/или ITelephony.endCall()), показать Toast,
-     * и через небольшую паузу открыть чат WhatsApp по lastOutgoing.
-     */
-    private fun finishCallAndOpenWA(ctx: Context, toastText: String) {
-        // 1) Toast + лог
-        try {
-            Toast.makeText(ctx, toastText, Toast.LENGTH_SHORT).show()
-            XposedBridge.log("Call2WA: detected toast -> \"$toastText\"")
-        } catch (_: Throwable) {}
+    private fun showToast(ctx: Context, text: String) {
+        try { Toast.makeText(ctx, text, Toast.LENGTH_SHORT).show() } catch (_: Throwable) {}
+    }
 
-        // 2) Попытка 1: TelecomManager.endCall()
+    private fun finishCallAndOpenWA(ctx: Context, toastText: String) {
+        showToast(ctx, toastText)
+        XposedBridge.log("Call2WA: toast -> \"$toastText\"")
+
+        // Попытка 1: TelecomManager.endCall()
         try {
             val tmgr = ctx.getSystemService(Context.TELECOM_SERVICE)
             if (tmgr != null) {
-                try {
+                runCatching {
                     XposedHelpers.callMethod(tmgr, "endCall")
-                    XposedBridge.log("Call2WA: endCall invoked via TelecomManager")
-                } catch (e: Throwable) {
-                    XposedBridge.log("Call2WA: TelecomManager.endCall() failed: ${e.message}")
+                    XposedBridge.log("Call2WA: endCall via TelecomManager")
                 }
             }
         } catch (e: Throwable) {
-            XposedBridge.log("Call2WA: TelecomManager access error: ${e.message}")
+            XposedBridge.log("Call2WA: TelecomManager error: ${e.message}")
         }
 
-        // 3) Попытка 2: ITelephony.endCall() через ServiceManager
+        // Попытка 2: ITelephony.endCall()
         try {
             val sm = XposedHelpers.findClass("android.os.ServiceManager", null)
             val binder = XposedHelpers.callStaticMethod(sm, "getService", "phone") as? android.os.IBinder
             if (binder != null) {
-                try {
-                    val stub = XposedHelpers.findClass("com.android.internal.telephony.ITelephony\$Stub", null)
-                    val iTel = XposedHelpers.callStaticMethod(stub, "asInterface", binder)
-                    XposedHelpers.callMethod(iTel, "endCall")
-                    XposedBridge.log("Call2WA: endCall invoked via ITelephony")
-                } catch (e: Throwable) {
-                    XposedBridge.log("Call2WA: ITelephony.endCall() failed: ${e.message}")
-                }
-            } else {
-                XposedBridge.log("Call2WA: ServiceManager.getService(\"phone\") returned null")
+                val stub = XposedHelpers.findClass("com.android.internal.telephony.ITelephony\$Stub", null)
+                val iTel = XposedHelpers.callStaticMethod(stub, "asInterface", binder)
+                XposedHelpers.callMethod(iTel, "endCall")
+                XposedBridge.log("Call2WA: endCall via ITelephony")
             }
         } catch (e: Throwable) {
-            XposedBridge.log("Call2WA: ITelephony attempt error: ${e.message}")
+            XposedBridge.log("Call2WA: ITelephony endCall failed: ${e.message}")
         }
 
-        // 4) Открываем WA чат с небольшой задержкой чтобы интерфейс звонка успел освободиться
+        // Открываем WhatsApp через 300 мс
         mainHandler.postDelayed({
             val number = lastOutgoing?.replace("\\D+".toRegex(), "")
             if (number.isNullOrBlank()) {
-                XposedBridge.log("Call2WA: lastOutgoing is null/blank, won't open WA")
+                XposedBridge.log("Call2WA: lastOutgoing is null — skip WA open")
                 return@postDelayed
             }
             try {
@@ -278,9 +244,9 @@ class HookInit : IXposedHookLoadPackage {
                     setPackage("com.whatsapp")
                 }
                 ctx.startActivity(i)
-                XposedBridge.log("Call2WA: WhatsApp chat opened for $number")
+                XposedBridge.log("Call2WA: WhatsApp opened for $number")
             } catch (e: Throwable) {
-                XposedBridge.log("Call2WA: openWhatsAppChat error: ${e.message}")
+                XposedBridge.log("Call2WA: openWA error: ${e.message}")
             }
         }, 300)
     }
