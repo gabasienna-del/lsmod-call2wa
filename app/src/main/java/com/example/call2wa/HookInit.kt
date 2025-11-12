@@ -4,8 +4,6 @@ import android.content.*
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.telecom.Call as TelecomCall
-import android.telecom.DisconnectCause
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
 import android.widget.Toast
