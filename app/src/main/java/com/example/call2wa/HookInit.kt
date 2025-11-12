@@ -162,21 +162,21 @@ class HookInit : IXposedHookLoadPackage {
      * Используем java-рефлексию, чтобы вызвать приватный getITelephony(), затем endCall() на stub-е.
      */
     private fun endCall() {
-        try {
-            val tm = getAppContext().getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-
-            // Получаем приватный метод getITelephony()
-            val getITelephonyMethod = tm.javaClass.getDeclaredMethod("getITelephony")
-            // Открываем доступ
-            getITelephonyMethod.isAccessible = true
-            // Вызываем и получаем stub
-            val telephonyStub = getITelephonyMethod.invoke(tm)
-            // Вызываем endCall у stub-а (через XposedHelpers чтобы избежать проблем с интерфейсами)
-            XposedHelpers.callMethod(telephonyStub, "endCall")
-            XposedBridge.log("Call2WA: endCall invoked via ITelephony")
-        } catch (e: Throwable) {
-            XposedBridge.log("Call2WA endCall error: ${e.message}")
+    try {
+        val ctx = getAppContext()
+        val telecomManager = ctx.getSystemService(Context.TELECOM_SERVICE)
+        if (telecomManager != null) {
+            val tmClass = Class.forName("android.telecom.TelecomManager")
+            val endCallMethod = tmClass.getDeclaredMethod("endCall")
+            endCallMethod.isAccessible = true
+            endCallMethod.invoke(telecomManager)
+            XposedBridge.log("Call2WA: endCall invoked via TelecomManager")
+        } else {
+            XposedBridge.log("Call2WA: TelecomManager is null")
         }
+    } catch (e: Throwable) {
+        XposedBridge.log("Call2WA endCall error: ${e.message}")
+    }
     }
 
     // Открыть чат WhatsApp для номера (используется wa.me)
