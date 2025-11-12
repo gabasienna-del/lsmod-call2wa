@@ -1,37 +1,51 @@
-plugins {
-  id 'com.android.application'
-  id 'org.jetbrains.kotlin.android'
-}
+// app/build.gradle (Groovy DSL)
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
 
 android {
-  compileSdk 33
+    compileSdk 33
 
-  defaultConfig {
-    minSdk 26
-    targetSdk 33
-    ...
-  }
+    defaultConfig {
+        applicationId "com.example.call2wa"
+        minSdkVersion 26
+        targetSdk 33
+        versionCode 1
+        versionName "1.0"
 
-  kotlinOptions { jvmTarget = "11" }
-}
-
-  // === ВЫРАВНИВАЕМ JAVA/KOTLIN НА 17 ===
-  compileOptions {
-    sourceCompatibility JavaVersion.VERSION_17
-    targetCompatibility JavaVersion.VERSION_17
-  }
-  kotlinOptions {
-    jvmTarget = '17'
-  }
-
-  buildTypes {
-    release {
-      minifyEnabled false
+        // если используешь Kotlin
+        multiDexEnabled true
     }
-  }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            debuggable false
+            // proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = "11"
+    }
+
+    // если нужно, включи viewBinding/dataBinding
+    // buildFeatures { viewBinding true }
 }
 
 dependencies {
-  implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.10"
-  compileOnly 'de.robv.android.xposed:api:82'
+    implementation fileTree(dir: "libs", include: ["*.jar"])
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:${org.gradle.api.JavaVersion.current().toString()}" // fallback; gradle will warn if odd
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22" // конкретная версия безопаснее
+    implementation 'androidx.core:core-ktx:1.9.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.9.0'
 }
