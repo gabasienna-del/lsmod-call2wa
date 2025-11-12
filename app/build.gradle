@@ -4,16 +4,16 @@ plugins {
 }
 
 android {
-  namespace "com.example.call2wa"
-  compileSdk 34
+  compileSdk 33
 
   defaultConfig {
-    applicationId "com.example.call2wa"
-    minSdk 24
-    targetSdk 34
-    versionCode 1
-    versionName "1.0"
+    minSdk 26
+    targetSdk 33
+    ...
   }
+
+  kotlinOptions { jvmTarget = "11" }
+}
 
   // === ВЫРАВНИВАЕМ JAVA/KOTLIN НА 17 ===
   compileOptions {
