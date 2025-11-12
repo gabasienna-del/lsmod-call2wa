@@ -1,9 +1,8 @@
-// app/build.gradle (замени полностью этим файлом)
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
 android {
-    namespace "com.example.call2wa"   // <- обязательно: укажи свой пакет здесь
+    namespace "com.example.call2wa"
     compileSdk 33
 
     defaultConfig {
@@ -16,14 +15,8 @@ android {
     }
 
     buildTypes {
-        debug {
-            minifyEnabled false
-            debuggable true
-        }
-        release {
-            minifyEnabled false
-            debuggable false
-        }
+        debug { minifyEnabled false; debuggable true }
+        release { minifyEnabled false; debuggable false }
     }
 
     compileOptions {
@@ -31,12 +24,13 @@ android {
         targetCompatibility JavaVersion.VERSION_11
     }
 
-    kotlinOptions {
-        jvmTarget = "11"
-    }
+    kotlinOptions { jvmTarget = "11" }
 }
 
 dependencies {
+    // Xposed API: compileOnly (не включать в .apk)
+    compileOnly files('libs/xposed-api-82.jar') // <- положи сюда xposed-api JAR с нужной версией
+
     implementation fileTree(dir: "libs", include: ["*.jar"])
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22"
     implementation 'androidx.core:core-ktx:1.9.0'
