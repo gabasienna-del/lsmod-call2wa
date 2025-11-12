@@ -1,39 +1,29 @@
-apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
 
 android {
-    namespace "com.example.call2wa"
+    namespace 'com.example.call2wa'
     compileSdk 33
 
     defaultConfig {
         applicationId "com.example.call2wa"
-        minSdkVersion 26
+        minSdk 26
         targetSdk 33
         versionCode 1
         versionName "1.0"
-        multiDexEnabled true
     }
 
     buildTypes {
-        debug { minifyEnabled false; debuggable true }
-        release { minifyEnabled false; debuggable false }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
     }
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_11
-        targetCompatibility JavaVersion.VERSION_11
-    }
-
-    kotlinOptions { jvmTarget = "11" }
 }
 
 dependencies {
-    // Xposed API: compileOnly (не включать в .apk)
-    compileOnly files('libs/xposed-api-82.jar') // <- положи сюда xposed-api JAR с нужной версией
-
     implementation fileTree(dir: "libs", include: ["*.jar"])
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22"
-    implementation 'androidx.core:core-ktx:1.9.0'
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'com.google.android.material:material:1.9.0'
+    compileOnly files("libs/xposed-api-82.jar")
 }
