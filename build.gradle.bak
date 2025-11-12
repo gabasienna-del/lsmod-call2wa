@@ -1,0 +1,4 @@
+/* Root build.gradle — без репозиториев (репозитории определяются в settings.gradle) */
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
