@@ -1,8 +1,9 @@
-// app/build.gradle (Groovy DSL)
+// app/build.gradle (замени полностью этим файлом)
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
 android {
+    namespace "com.example.call2wa"   // <- обязательно: укажи свой пакет здесь
     compileSdk 33
 
     defaultConfig {
@@ -11,8 +12,6 @@ android {
         targetSdk 33
         versionCode 1
         versionName "1.0"
-
-        // если используешь Kotlin
         multiDexEnabled true
     }
 
@@ -24,7 +23,6 @@ android {
         release {
             minifyEnabled false
             debuggable false
-            // proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
 
@@ -36,15 +34,11 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
-
-    // если нужно, включи viewBinding/dataBinding
-    // buildFeatures { viewBinding true }
 }
 
 dependencies {
     implementation fileTree(dir: "libs", include: ["*.jar"])
-    implementation "org.jetbrains.kotlin:kotlin-stdlib:${org.gradle.api.JavaVersion.current().toString()}" // fallback; gradle will warn if odd
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22" // конкретная версия безопаснее
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22"
     implementation 'androidx.core:core-ktx:1.9.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.9.0'
