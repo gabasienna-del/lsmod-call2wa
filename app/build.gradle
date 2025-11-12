@@ -17,14 +17,8 @@ android {
     }
 
     buildTypes {
-        debug {
-            minifyEnabled false
-            debuggable true
-        }
-        release {
-            minifyEnabled false
-            debuggable false
-        }
+        debug { minifyEnabled false; debuggable true }
+        release { minifyEnabled false; debuggable false }
     }
 
     compileOptions {
@@ -32,14 +26,12 @@ android {
         targetCompatibility JavaVersion.VERSION_11
     }
 
-    kotlinOptions {
-        jvmTarget = "11"
-    }
+    kotlinOptions { jvmTarget = "11" }
 }
 
 dependencies {
-    // Xposed API через maven (не хранить jar в репо)
-    compileOnly "io.github.kyuubiran.ezxhelper:xposed-api-82:3.0.1"
+    // используем локальный jar Xposed API (надёжно для компиляции)
+    compileOnly files("libs/api-82.jar")
 
     implementation fileTree(dir: "libs", include: ["*.jar"])
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22"
