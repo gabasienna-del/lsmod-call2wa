@@ -13,17 +13,37 @@ android {
         targetSdk 33
         versionCode 1
         versionName "1.0"
+        multiDexEnabled true
     }
 
     buildTypes {
+        debug {
+            minifyEnabled false
+            debuggable true
+        }
         release {
             minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            debuggable false
         }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = "11"
     }
 }
 
 dependencies {
+    // Xposed API через maven (не хранить jar в репо)
+    compileOnly "io.github.kyuubiran.ezxhelper:xposed-api-82:3.0.1"
+
     implementation fileTree(dir: "libs", include: ["*.jar"])
-    compileOnly files("libs/xposed-api-82.jar")
+    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22"
+    implementation 'androidx.core:core-ktx:1.9.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.9.0'
 }
